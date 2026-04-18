@@ -50,9 +50,13 @@ import os
 import pprint
 import sys
 import threading
+import time
+import paho.mqtt.client as mqtt
+import json
 
 from collections import OrderedDict
 
+import timestamp
 from PyQt5.QtCore import (Qt, QObject, pyqtSignal, QTimer, QRegExp, QPoint,
                           QAbstractTableModel)
 from PyQt5.QtGui import (QIcon, QRegExpValidator, QStandardItem,
@@ -81,12 +85,12 @@ logger.basicConfig(level=logger.INFO)
 
 GUI_APP_TITLE = 'SLLURP GUI - RFID inventory control'
 GUI_ICON_PATH = 'rfid.png'
-GUI_DEFAULT_HOST = '169.254.1.1'
+GUI_DEFAULT_HOST = '192.168.1.10'
 GUI_DEFAULT_PORT = 5084
 
-TAGS_TABLE_HEADERS = ["EPC", "Antenna", "Best\nRSSI", "First\nChannel",
+TAGS_TABLE_HEADERS = ["No", "EPC", "Antenna", "Best\nRSSI", "First\nChannel",
                       "Tag Seen\nCount", "Last\nRSSI", "Last\nChannel"]
-TAGS_TABLE_COLUMNS = ['epc', 'antenna_id', 'rssi', 'channel_index',
+TAGS_TABLE_COLUMNS = ['count', 'epc', 'antenna_id', 'rssi', 'channel_index',
                       'seen_count', 'last_rssi', 'last_channel_index']
 
 DEFAULT_POWER_TABLE = [index for index in range(15, 25, 1)]
@@ -437,6 +441,7 @@ class Gui(QObject):
         self.graph_refresh_timer.timeout.connect(self.graph_update)
         self.graph_refresh_timer.setInterval(100)
 
+        self.rows = []
 
         # ui
         win = MainWindow()
@@ -493,6 +498,35 @@ class Gui(QObject):
 
         self.log("Using sllurp version %s" % sllurp_version)
         self.resetWindowWidgets()
+
+        # ================= MQTT SETUP =================
+        self.status_topic = "race/station1/status"
+        self.tag_topic = "race/reader1/tag"
+
+        self.buffer = []
+        self.mqtt_connected = False
+        self.station_connected = False
+
+        self.mqtt_client = mqtt.Client()
+        # LWT (Last Will)
+        self.mqtt_client.will_set(
+            self.status_topic,
+            payload="disconnect",
+            qos=1,
+            retain=True
+        )
+
+        # reconnect delay
+        self.mqtt_client.reconnect_delay_set(min_delay=1, max_delay=10)
+
+        # callbacks
+        self.mqtt_client.on_connect = self.on_connect
+        self.mqtt_client.on_disconnect = self.on_disconnect
+        self.mqtt_client.on_message = self.on_message
+
+        # connect
+        self.mqtt_client.connect("31.97.222.215", 1883, 60)
+        self.mqtt_client.loop_start()
 
     def connect(self):
         """open connection with the reader through LLRP protocol
@@ -718,7 +752,6 @@ class Gui(QObject):
         the report parsing on the QT loop to avoid GUI freezing
         """
         with self.tags_db_lock:
-
             history_enabled = self.history_enabled
             tags_db = self.tags_db
             start_time = self.reader_start_time
@@ -733,79 +766,142 @@ class Gui(QObject):
             #logger.info('Full: %s', pprint.pformat(tags))
 
             # parsing each tag in the report
-            for tag in tags:
-                # get epc ID. (EPC covers EPC-96 and EPCData)
-                epc = tag["EPC"].decode("utf-8").upper()
-                ant_id = tag["AntennaID"]
-                # Convert to milliseconds
-                if start_time:
-                    new_first_seen_tstamp = \
-                        (tag.get('FirstSeenTimestampUTC', start_time)
-                        - start_time) // 1000
-                else:
-                    # ROSpec start was missed, or data was cleared
-                    # mid-inventory
-                    new_first_seen_tstamp = 0
-                    start_time = tag.get('FirstSeenTimestampUTC', 0)
-                    self.reader_start_time = start_time
+            if len(tags):
+                for tag in tags:
+                    # get epc ID. (EPC covers EPC-96 and EPCData)
+                    epc = tag["EPC"].decode("utf-8").upper()
+                    # epcundecoded = str(tag['EPC-96'].decode("utf-8"))
+                    # try:
+                    #     epc=int(epcundecoded)
+                    # except ValueError:
+                    #     epc=int(""+epcundecoded+"",16)
 
-                last_seen_tstamp = (tag.get('LastSeenTimestampUTC', start_time)
-                                    - start_time) // 1000
-                key = (epc, ant_id)
-                prev_info = tags_db.get(key, {})
-                prev_history = prev_info.get('history', TagHistory(key))
+                    firstmlsec = repr(tag['FirstSeenTimestampUTC'] / 1e6).split('.')[1][:3]
+                    first = time.localtime(tag['FirstSeenTimestampUTC'] / 1e6)
+                    firstimestamp = time.strftime("%Y-%m-%d %H:%M:%S.{}".format(firstmlsec), first)
 
-                seen_count_new = tag.get('TagSeenCount', 1)
-                seen_count = prev_info.get('seen_count', 0) + seen_count_new
+                    lastmlsec = repr(tag['LastSeenTimestampUTC'] / 1e6).split('.')[1][:3]
+                    last = time.localtime(tag['LastSeenTimestampUTC'] / 1e6)
+                    lasttimestamp = time.strftime("%Y-%m-%d %H:%M:%S.{}".format(lastmlsec), last)
 
-                channel_idx_new = tag.get('ChannelIndex', 0)
-                channel_idx_old = prev_info.get('channel_index', 0)
+                    ant_id = tag['AntennaID']
+                    rssi = tag['PeakRSSI']
+                    data = (epc, firstimestamp, lasttimestamp, ant_id, rssi, reader)
+                    print(epc, firstimestamp, lasttimestamp, ant_id, rssi, reader)
 
-                # PeakRSSI highest value
-                peakrssi_new = tag.get('PeakRSSI', -120)
-                peakrssi_best = max(peakrssi_new, prev_info.get('rssi', -120))
+                    key = (epc, ant_id)
+                    prev_info = tags_db.get(key, {})
+                    prev_history = prev_info.get('history', TagHistory(key))
 
-                first_seen_tstamp = prev_info.get('first_seen',
-                                                new_first_seen_tstamp)
+                    seen_count_new = tag.get('TagSeenCount', 1)
+                    seen_count = prev_info.get('seen_count', 0) + seen_count_new
 
-                new_info = {
-                    'epc': epc,
-                    'antenna_id': ant_id,
-                    'history': prev_history,
-                    'rssi': peakrssi_best,
-                    'channel_index': channel_idx_old or channel_idx_new,
-                    'seen_count': seen_count,
-                    'first_seen': first_seen_tstamp,
-                    'last_seen': last_seen_tstamp,
-                    'last_rssi': peakrssi_new,
-                    'last_channel_index': channel_idx_new
-                }
+                    channel_idx_new = tag.get('ChannelIndex', 0)
+                    channel_idx_old = prev_info.get('channel_index', 0)
 
-                # Add Impinj specific data if available
-                phase = tag.get('ImpinjRFPhaseAngle')
-                if phase is not None:
-                    new_info['impinj_phase'] = phase
-                doppler_freq = tag.get('ImpinjRFDopplerFrequency')
-                if doppler_freq is not None:
-                    new_info['impinj_doppler'] = doppler_freq
+                    # PeakRSSI highest value
+                    peakrssi_new = tag.get('PeakRSSI', -120)
+                    peakrssi_best = max(peakrssi_new, prev_info.get('rssi', -120))
 
-                tags_db[key] = new_info
+                    new_info = {
+                        'epc': epc,
+                        'antenna_id': ant_id,
+                        'history': prev_history,
+                        'rssi': peakrssi_best,
+                        'channel_index': channel_idx_old or channel_idx_new,
+                        'seen_count': seen_count,
+                        'first_seen': firstimestamp,
+                        'last_seen': lasttimestamp,
+                        'last_rssi': peakrssi_new,
+                        'last_channel_index': channel_idx_new
+                    }
 
-                if history_enabled:
-                    prev_history.add_data(new_first_seen_tstamp,
-                                        peakrssi_new,
-                                        channel_idx_new,
-                                        phase,
-                                        doppler_freq)
+                    # Add Impinj specific data if available
+                    phase = tag.get('ImpinjRFPhaseAngle')
+                    if phase is not None:
+                        new_info['impinj_phase'] = phase
+                    doppler_freq = tag.get('ImpinjRFDopplerFrequency')
+                    if doppler_freq is not None:
+                        new_info['impinj_doppler'] = doppler_freq
+
+                    tags_db[key] = new_info
+
+                    # if history_enabled:
+                    #     prev_history.add_data(new_first_seen_tstamp,
+                    #                         peakrssi_new,
+                    #                         channel_idx_new,
+                    #                         phase,
+                    #                         doppler_freq)
 
 
-                new_tag_seen_count += seen_count_new
-                updated_tag_keys.add(key)
-
+                    new_tag_seen_count += seen_count_new
+                    updated_tag_keys.add(key)
+                    # buat JSON
+                    data_json = {
+                        "chipcode": new_info['epc'],
+                        "timestamp": firstimestamp,
+                        "antenna": new_info['antenna_id'],
+                        "rssi": new_info['last_rssi'],
+                        "reader": str(self.window.hostLineEdit.text()),
+                        "timingpoint": "CP"
+                    }
+                    self.safe_publish(data_json)
             self.total_tags_seen += new_tag_seen_count
 
-
         self.inventoryReportReceived.emit(updated_tag_keys)
+
+    def flush_buffer(self):
+        print("Flushing buffer:", len(self.buffer))
+
+        while self.buffer:
+            payload = self.buffer.pop(0)
+            self.mqtt_client.publish(self.tag_topic, payload, qos=1)
+
+    def safe_publish(self, payload_dict):
+        payload_json = json.dumps(payload_dict)
+
+        if self.mqtt_connected and self.station_connected:
+            self.mqtt_client.publish(self.tag_topic, payload_json, qos=1)
+        else:
+            print("Buffering data...")
+            self.buffer.append(payload_json)
+
+            # limit buffer
+            if len(self.buffer) > 2000:
+                self.buffer.pop(0)
+
+    def on_connect(self, client, userdata, flags, rc):
+        print("MQTT Connected:", rc)
+        self.mqtt_connected = True
+
+        client.subscribe("race/station1/status")
+
+        # publish status CONNECT
+        self.mqtt_client.publish(
+            self.status_topic,
+            "connect",
+            qos=1,
+            retain=True
+        )
+
+        # flush buffer kalau station sudah connect
+        if self.station_connected:
+            self.flush_buffer()
+
+    def on_disconnect(self, client, userdata, rc):
+        print("MQTT Disconnected")
+        self.mqtt_connected = False
+
+    def on_message(self, client, userdata, msg):
+        topic = msg.topic
+        payload = msg.payload.decode()
+
+        if topic == "race/reader1/status":
+            print("Station status:", payload)
+            self.station_connected = (payload == "connect")
+
+            if self.station_connected:
+                self.flush_buffer()
 
     def reader_event_cb(self, reader, events):
         timestamp_event = events.get('UTCTimestamp', {})
@@ -1207,7 +1303,8 @@ class MainWindow(QMainWindow):
         # workaround to fix showMaximized on Windows
         # https://stackoverflow.com/questions/27157312/qt-showmaximized-not-working-in-windows
         self.resize(800, 600)
-        self.showMaximized()
+        # self.showMaximized()
+        self.showNormal()
         self.connectUIEventToControllerHandler()
 
         # Create a status bar
