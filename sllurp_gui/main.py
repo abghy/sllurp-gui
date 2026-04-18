@@ -88,9 +88,9 @@ GUI_ICON_PATH = 'rfid.png'
 GUI_DEFAULT_HOST = '192.168.1.10'
 GUI_DEFAULT_PORT = 5084
 
-TAGS_TABLE_HEADERS = ["No", "EPC", "Antenna", "Best\nRSSI", "First\nChannel",
+TAGS_TABLE_HEADERS = ["No", "EPC", "Antenna", "Timestamp", "Best\nRSSI", "First\nChannel",
                       "Tag Seen\nCount", "Last\nRSSI", "Last\nChannel"]
-TAGS_TABLE_COLUMNS = ['count', 'epc', 'antenna_id', 'rssi', 'channel_index',
+TAGS_TABLE_COLUMNS = ['count', 'epc', 'antenna_id', 'first_seen', 'rssi', 'channel_index',
                       'seen_count', 'last_rssi', 'last_channel_index']
 
 DEFAULT_POWER_TABLE = [index for index in range(15, 25, 1)]
@@ -751,6 +751,7 @@ class Gui(QObject):
         """sllurp tag report callback, it emits a signal in order to perform
         the report parsing on the QT loop to avoid GUI freezing
         """
+        print(self.station_connected)
         with self.tags_db_lock:
             history_enabled = self.history_enabled
             tags_db = self.tags_db
@@ -786,8 +787,8 @@ class Gui(QObject):
 
                     ant_id = tag['AntennaID']
                     rssi = tag['PeakRSSI']
-                    data = (epc, firstimestamp, lasttimestamp, ant_id, rssi, reader)
-                    print(epc, firstimestamp, lasttimestamp, ant_id, rssi, reader)
+                    data = (epc, firstimestamp, lasttimestamp, ant_id, rssi, str(self.window.hostLineEdit.text()))
+                    print(epc, firstimestamp, lasttimestamp, ant_id, rssi, str(self.window.hostLineEdit.text()))
 
                     key = (epc, ant_id)
                     prev_info = tags_db.get(key, {})
@@ -826,13 +827,12 @@ class Gui(QObject):
 
                     tags_db[key] = new_info
 
-                    # if history_enabled:
-                    #     prev_history.add_data(new_first_seen_tstamp,
-                    #                         peakrssi_new,
-                    #                         channel_idx_new,
-                    #                         phase,
-                    #                         doppler_freq)
-
+                    if history_enabled:
+                        prev_history.add_data(firstimestamp,
+                                            peakrssi_new,
+                                            channel_idx_new,
+                                            phase,
+                                            doppler_freq)
 
                     new_tag_seen_count += seen_count_new
                     updated_tag_keys.add(key)
@@ -874,7 +874,7 @@ class Gui(QObject):
         print("MQTT Connected:", rc)
         self.mqtt_connected = True
 
-        client.subscribe("race/station1/status")
+        client.subscribe("race/reader1/status")
 
         # publish status CONNECT
         self.mqtt_client.publish(
@@ -899,7 +899,6 @@ class Gui(QObject):
         if topic == "race/reader1/status":
             print("Station status:", payload)
             self.station_connected = (payload == "connect")
-
             if self.station_connected:
                 self.flush_buffer()
 
@@ -1329,8 +1328,7 @@ class MainWindow(QMainWindow):
         headerL.addWidget(readerControlW)
 
         # create connect/disconnect button
-        self.connectionButton = QPushButton("Connect",
-                                                      parent=readerControlW)
+        self.connectionButton = QPushButton("Connect",parent=readerControlW)
         self.connectionButton.setCheckable(True)
         readerControlL.addWidget(self.connectionButton)
 
