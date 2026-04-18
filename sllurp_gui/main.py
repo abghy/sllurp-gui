@@ -53,6 +53,7 @@ import threading
 import time
 import paho.mqtt.client as mqtt
 import json
+import csv
 
 from collections import OrderedDict
 
@@ -509,7 +510,8 @@ class Gui(QObject):
         self.mqtt_connected = False
         self.station_connected = False
 
-        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.mqtt_client = mqtt.Client()
+        # self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         # LWT (Last Will)
         self.mqtt_client.will_set(
             self.status_topic,
@@ -527,7 +529,8 @@ class Gui(QObject):
         self.mqtt_client.on_message = self.on_message
 
         # connect
-        self.mqtt_client.connect_async("31.97.222.215", 1883, 60)
+        self.mqtt_client.connect("31.97.222.215", 1883, 60)
+        # self.mqtt_client.connect_async("31.97.222.215", 1883, 60)
         self.mqtt_client.loop_start()
 
     def connect(self):
