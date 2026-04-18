@@ -472,6 +472,8 @@ class Gui(QObject):
             self.clearInventoryEvent
         )
         win.clearInventoryButton.clicked.connect(self.clearInventoryEvent)
+        win.CreateCSV.clicked.connect(self.PrintCSV)
+        self.rows = []
 
         win.graph_history_enable.setChecked(self.history_enabled)
         win.graph_history_enable.stateChanged.connect(
@@ -507,7 +509,7 @@ class Gui(QObject):
         self.mqtt_connected = False
         self.station_connected = False
 
-        self.mqtt_client = mqtt.Client()
+        self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         # LWT (Last Will)
         self.mqtt_client.will_set(
             self.status_topic,
@@ -525,7 +527,7 @@ class Gui(QObject):
         self.mqtt_client.on_message = self.on_message
 
         # connect
-        self.mqtt_client.connect("31.97.222.215", 1883, 60)
+        self.mqtt_client.connect_async("31.97.222.215", 1883, 60)
         self.mqtt_client.loop_start()
 
     def connect(self):
@@ -846,6 +848,7 @@ class Gui(QObject):
                         "timingpoint": "CP"
                     }
                     self.safe_publish(data_json)
+                    self.rows.append((new_info['epc'], new_info['last_rssi'], firstimestamp, str(self.window.hostLineEdit.text()), new_info['antenna_id'], "CP"))
             self.total_tags_seen += new_tag_seen_count
 
         self.inventoryReportReceived.emit(updated_tag_keys)
@@ -1011,6 +1014,14 @@ class Gui(QObject):
             # Only show the log entry when it did something
             self.log('Tag data cleared')
         self.update_status('')
+
+    def PrintCSV(self):
+        filename = "output.csv"  # atau path yang kamu mau
+        with open(filename, 'w', newline='') as f:
+            print("Writing %d rows..." % len(self.rows))
+            wri = csv.writer(f, dialect='excel')
+            wri.writerow(('epc', 'rssi', 'timestamp', 'reader', 'antenna'))
+            wri.writerows(self.rows)
 
     def delayreaderConfigChangedEvent(self):
         """used to delay the power applying when the user slides
@@ -1358,6 +1369,11 @@ class MainWindow(QMainWindow):
         self.clearInventoryButton = QPushButton(
             "Clear inventory report", parent=readerControlW)
         readerControlL.addWidget(self.clearInventoryButton)
+
+        # create CSV
+        self.CreateCSV = QPushButton(
+            "Create CSV", parent=readerControlW)
+        readerControlL.addWidget(self.CreateCSV)
 
         # create reader settings button
         readerSettingsW = QGroupBox("Reader Settings", parent=readerControlW)
